@@ -1,0 +1,16 @@
+joblib
+numpy
+scikit-learn
+beautifulsoup4
+whois
+google
+pandas
+matplotlib
+sklearn
+ipaddress
+requests
+python-whois
+pythonwhois
+datetime
+time
+google
