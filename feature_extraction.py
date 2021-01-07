@@ -2,23 +2,54 @@ import ipaddress
 import re
 import urllib.request
 from bs4 import BeautifulSoup
-import socket
 import requests
 from googlesearch import search
 import whois
 from datetime import datetime
 import time
 from dateutil.parser import parse as date_parse
-
+import ssl
+import OpenSSL
+import socket
+from tldextract import extract
 # Calculates number of months
 def diff_month(d1, d2):
     return (d1.year - d2.year) * 12 + d1.month - d2.month
+def ssl_expiry_datetime(hostname):
+        ssl_date_fmt = r'%b %d %H:%M:%S %Y %Z'
 
+        context = ssl.create_default_context()
+        conn = context.wrap_socket(
+            socket.socket(socket.AF_INET),
+            server_hostname=hostname,
+        )
+        # 3 second timeout because Lambda has runtime limitations
+        conn.settimeout(3.0)
+        conn.connect((hostname, 443))
+        certificate = conn.getpeercert()
+        issuer = dict(x[0] for x in certificate['issuer'])
+        certificate_Auth = str(issuer['commonName'])
+        certificate_Auth = certificate_Auth.split()
+        if(certificate_Auth[0] == "Network" or certificate_Auth == "Deutsche"):
+            certificate_Auth = certificate_Auth[0] + " " + certificate_Auth[1]
+        else:
+            certificate_Auth = certificate_Auth[0] 
+        trusted_Auth = ['Comodo','Symantec','GoDaddy','GlobalSign','DigiCert','StartCom','Entrust','Verizon','Trustwave','Unizeto','Buypass','QuoVadis','Deutsche Telekom','Network Solutions','SwissSign','IdenTrust','Secom','TWCA','GeoTrust','Thawte','Doster','VeriSign']
+        startingDate = str(certificate['notBefore'])
+        endingDate = str(certificate['notAfter'])
+        startingYear = int(startingDate.split()[3])
+        endingYear = int(endingDate.split()[3])
+        Age_of_certificate = endingYear-startingYear
+        #print(str(certificate_Auth))
+        if(certificate_Auth not in trusted_Auth):
+            Age_of_certificate-=1
+        # parse the string from the certificate into a Python datetime object
+        return Age_of_certificate
 # Generate data set by extracting the features from the URL
 def generate_data_set(url):
 
     data_set = []
-
+    hostname = url
     # Converts the given URL into standard format
     if not re.match(r"^https?", url):
         url = "http://" + url
@@ -52,10 +83,10 @@ def generate_data_set(url):
         global_rank = -1
 
     # 1.having_IP_Address
-    try:
-        ipaddress.ip_address(url)
+    match = re.search('[0-9]{1,3}[.]+?[0-9]{1,3}[.]+?[0-9]{0,3}[.]+?[0-9]{1,3}',url)
+    if match!=None:
         data_set.append(-1)
-    except:
+    else:
         data_set.append(1)
 
     # 2.URL_Length
@@ -107,12 +138,23 @@ def generate_data_set(url):
         data_set.append(-1)
 
     # 8.SSLfinal_State
-    try:
+    '''try:
         if response.text:
+            data_set.append(0)
+    except:
+        data_set.append(-1)'''
+    #now = datetime.now()
+    try:
+        age = ssl_expiry_datetime(hostname)
+        #print("age:"+str(age))
+    #diff = ssl_expiry_datetime(hostname) - now
+        #print(diff)
+        if(age>=1):
             data_set.append(1)
+        else:
+            data_set.append(0)
     except:
         data_set.append(-1)
-
     # 9.Domain_registeration_length
     expiration_date = whois_response.expiration_date
     registration_length = 0
@@ -139,12 +181,12 @@ def generate_data_set(url):
                     dots = [x.start(0) for x in re.finditer('\.', head.link['href'])]
                     if url in head.link['href'] or len(dots) == 1 or domain in head.link['href']:
                         data_set.append(1)
-                        raise StopIteration
+                        break
                     else:
                         data_set.append(-1)
-                        raise StopIteration
+                        break
         except StopIteration:
-            pass
+            data_set.append(-1)
 
     #11. port
     try:
@@ -206,33 +248,35 @@ def generate_data_set(url):
 
 
     #14. URL_of_Anchor
-    percentage = 0
-    i = 0
-    unsafe=0
-    if soup == -999:
-        data_set.append(-1)
-    else:
-        for a in soup.find_all('a', href=True):
-        # 2nd condition was 'JavaScript ::void(0)' but we put JavaScript because the space between javascript and :: might not be
-                # there in the actual a['href']
-            if "#" in a['href'] or "javascript" in a['href'].lower() or "mailto" in a['href'].lower() or not (url in a['href'] or domain in a['href']):
-                unsafe = unsafe + 1
-            i = i + 1
-
-
-        try:
-            percentage = unsafe / float(i) * 100
-        except:
+    try:
+        subDomain, domains, suffix = extract(hostname)
+        websiteDomain = domains
+        
+        opener = urllib.request.urlopen(hostname).read()
+        soup = BeautifulSoup(opener, 'lxml')
+        anchors = soup.findAll('a', href=True)
+        total = len(anchors)
+        linked_to_same = 0
+        avg = 0
+        for anchor in anchors:
+            subDomain, domains, suffix = extract(anchor['href'])
+            anchorDomain = domains
+            if(websiteDomain==anchorDomain or anchorDomain==''):
+                linked_to_same = linked_to_same + 1
+        linked_outside = total-linked_to_same
+        if(total!=0):
+            avg = linked_outside/total
+            
+        if(avg<0.31):
             data_set.append(1)
-
-        if percentage < 31.0:
-            data_set.append(1)
-        elif ((percentage >= 31.0) and (percentage < 67.0)):
+        elif(0.31<=avg<=0.67):
             data_set.append(0)
         else:
             data_set.append(-1)
-
+    except:
+        data_set.append(-1)
     #15. Links_in_tags
+    percentage = 0
     i=0
     success =0
     if soup == -999:
@@ -261,18 +305,23 @@ def generate_data_set(url):
         else :
            data_set.append(-1)
 
-        #16. SFH
-        for form in soup.find_all('form', action= True):
+    #16. SFH
+    try:
+       for form in soup.find_all('form', action= True):
            if form['action'] =="" or form['action'] == "about:blank" :
               data_set.append(-1)
-              break
+              raise StopIteration
            elif url not in form['action'] and domain not in form['action']:
-               data_set.append(0)
-               break
+              data_set.append(0)
+              raise StopIteration
            else:
-                 data_set.append(1)
-                 break
-
+              data_set.append(1)
+              raise StopIteration
+       data_set.append(1)
+       StopIteration
+    except:
+        #data_set.append(-1)
+        pass
     #17. Submitting_to_email
     if response == "":
         data_set.append(-1)
@@ -373,7 +422,7 @@ def generate_data_set(url):
             data_set.append(1)
         else:
             data_set.append(0)
-    except TypeError:
+    except:
         data_set.append(-1)
 
     #27. Page_Rank
@@ -387,22 +436,28 @@ def generate_data_set(url):
 
     #28. Google_Index
     site=search(url, 5)
-    if site:
-        data_set.append(1)
-    else:
-        data_set.append(-1)
-
-    #29. Links_pointing_to_page
-    if response == "":
-        data_set.append(-1)
-    else:
-        number_of_links = len(re.findall(r"<a href=", response.text))
-        if number_of_links == 0:
+    try:
+        if site:
             data_set.append(1)
-        elif number_of_links <= 2:
-            data_set.append(0)
         else:
             data_set.append(-1)
+    except:
+            data_set.append(-1)
+
+    #29. Links_pointing_to_page
+    try:
+        if response == "":
+            data_set.append(-1)
+        else:
+            number_of_links = len(re.findall(r"<a href=", response.text))
+            if number_of_links == 0:
+                data_set.append(1)
+            elif number_of_links <= 2:
+                data_set.append(0)
+            else:
+                data_set.append(-1)
+    except:
+        data_set.append(-1)
 
     #30. Statistical_report
     url_match=re.search('at\.ua|usa\.cc|baltazarpresentes\.com\.br|pe\.hu|esy\.es|hol\.es|sweddy\.com|myjino\.ru|96\.lt|ow\.ly',url)
@@ -423,6 +478,6 @@ def generate_data_set(url):
     except:
         print ('Connection problem. Please check your internet connection!')
 
-
+    print(len(data_set))
     print (data_set)
     return data_set
